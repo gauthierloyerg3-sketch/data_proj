@@ -54,7 +54,7 @@ def test_validate_required_columns_present():
     )
 
     # Should not raise
-        validate_required_columns(df)
+    validate_required_columns(df)
 
 
 def test_time_aware_train_test_split_chronological():

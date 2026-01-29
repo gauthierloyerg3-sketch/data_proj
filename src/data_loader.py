@@ -38,12 +38,134 @@ def validate_required_columns(df: pd.DataFrame):
     Raises:
         ValueError: if dataset doesn't match expected format.
     """
+    if df is None or df.empty:
+        raise ValueError("Dataset is None or empty. Cannot validate columns.")
+    
     missing = REQUIRED_COLUMNS.difference(df.columns)
     if missing:
         raise ValueError(
             f"Dataset missing required columns: {sorted(missing)}. "
             f"Available columns: {sorted(df.columns)}"
         )
+
+
+def validate_data_leakage_risks(
+    df: pd.DataFrame,
+    check_inventory_level: bool = True,
+    check_units_ordered: bool = True,
+    verbose: bool = False,
+) -> Dict[str, Any]:
+    """
+    Validate potential data leakage risks from temporal features.
+    
+    Checks if features like "Inventory Level" and "Units Ordered" might contain
+    future information that would cause data leakage. This is a warning system
+    - the actual semantics depend on your data collection process.
+    
+    Args:
+        df: DataFrame with potential leakage-risk features
+        check_inventory_level: Check if Inventory Level might be end-of-day (leakage risk)
+        check_units_ordered: Check if Units Ordered might be future orders (leakage risk)
+        verbose: Print detailed warnings
+        
+    Returns:
+        Dictionary with validation results and warnings
+    """
+    warnings = []
+    risks = []
+    
+    if df is None or df.empty:
+        return {
+            "has_warnings": False,
+            "warnings": [],
+            "risks": [],
+            "recommendations": []
+        }
+    
+    # Check Inventory Level
+    if check_inventory_level and "Inventory Level" in df.columns:
+        # Check for suspicious patterns that might indicate end-of-day inventory
+        # (which would leak information about sales)
+        inv_col = df["Inventory Level"]
+        if inv_col.min() < 0:
+            warnings.append(
+                "Inventory Level contains negative values. This may indicate data quality issues."
+            )
+            risks.append("inventory_negative_values")
+        
+        # Statistical check: if inventory is perfectly correlated with future sales,
+        # it might be end-of-day inventory (leakage)
+        if "quantity" in df.columns:
+            # Check correlation with future sales (if we have temporal ordering)
+            if isinstance(df.index, pd.DatetimeIndex):
+                # Sort by date
+                df_sorted = df.sort_index()
+                # Check if inventory at time t correlates with sales at time t+1
+                # (this would indicate end-of-day inventory)
+                if len(df_sorted) > 1:
+                    inv_t = df_sorted["Inventory Level"].iloc[:-1]
+                    sales_t1 = df_sorted["quantity"].iloc[1:]
+                    if len(inv_t) == len(sales_t1):
+                        corr = inv_t.corr(sales_t1)
+                        if corr > 0.7:  # High correlation might indicate leakage
+                            warnings.append(
+                                f"Inventory Level shows high correlation ({corr:.2f}) with next-day sales. "
+                                "This may indicate end-of-day inventory (data leakage risk). "
+                                "Verify that Inventory Level represents start-of-day values."
+                            )
+                            risks.append("inventory_temporal_correlation")
+    
+    # Check Units Ordered
+    if check_units_ordered and "Units Ordered" in df.columns:
+        units_col = df["Units Ordered"]
+        if units_col.min() < 0:
+            warnings.append(
+                "Units Ordered contains negative values. This may indicate data quality issues."
+            )
+            risks.append("units_ordered_negative_values")
+        
+        # Check if Units Ordered might represent future orders
+        # (This is harder to detect automatically, but we can check for patterns)
+        if "quantity" in df.columns:
+            # If Units Ordered is always >= quantity, it might be future orders
+            if (units_col >= df["quantity"]).all():
+                warnings.append(
+                    "Units Ordered is always >= actual sales. This may indicate future orders "
+                    "(data leakage risk). Verify that Units Ordered represents historical orders."
+                )
+                risks.append("units_ordered_future_pattern")
+    
+    # Generate recommendations
+    recommendations = []
+    if risks:
+        recommendations.append(
+            "Review feature temporal semantics: ensure all features are available at prediction time."
+        )
+        if "inventory_temporal_correlation" in risks:
+            recommendations.append(
+                "Consider excluding 'Inventory Level' if it represents end-of-day values, "
+                "or transform to start-of-day values."
+            )
+        if "units_ordered_future_pattern" in risks:
+            recommendations.append(
+                "Consider excluding 'Units Ordered' if it represents future orders to be placed."
+            )
+    
+    if verbose and warnings:
+        print("\n⚠️  Data Leakage Risk Warnings:")
+        for warning in warnings:
+            print(f"  - {warning}")
+        if recommendations:
+            print("\n💡 Recommendations:")
+            for rec in recommendations:
+                print(f"  - {rec}")
+    
+    return {
+        "has_warnings": len(warnings) > 0,
+        "warnings": warnings,
+        "risks": risks,
+        "recommendations": recommendations
+    }
 
 
 def load_raw_data(data_path: str = "data/raw/supermarket_sales.csv") -> pd.DataFrame:
@@ -54,24 +176,51 @@ def load_raw_data(data_path: str = "data/raw/supermarket_sales.csv") -> pd.DataF
     If ZIP contains multiple CSV files, loads the first one found.
 
     Args:
-        data_path: Path to the raw CSV file or ZIP archive containing CSV
+        data_path: Path to CSV file or ZIP archive containing CSV
 
     Returns:
         DataFrame with raw sales data
+
+    Raises:
+        FileNotFoundError: if data file doesn't exist
+        ValueError: if file format is invalid or data cannot be loaded
+        pd.errors.EmptyDataError: if file is empty
     """
+    if not data_path:
+        raise ValueError("data_path cannot be empty or None.")
+    
     data_path = Path(data_path)
     if not data_path.exists():
-        raise FileNotFoundError(f"Data file not found: {data_path}")
-
-    # Check if it's a ZIP file
-    if data_path.suffix.lower() == '.zip':
-        return _load_from_zip(data_path)
-    else:
-        # Regular CSV file
-        df = pd.read_csv(data_path)
-        # Validate schema (returns format type, but we don't need to store it here)
-        validate_required_columns(df)
-        return df
+        raise FileNotFoundError(
+            f"Data file not found: {data_path}\n"
+            f"Please ensure the dataset exists at the specified path."
+        )
+    
+    try:
+        if data_path.suffix.lower() == ".zip":
+            return _load_from_zip(data_path)
+        else:
+            # Try loading as CSV
+            try:
+                df = pd.read_csv(data_path)
+                if df.empty:
+                    raise ValueError(f"Data file is empty: {data_path}")
+                # Validate schema
+                validate_required_columns(df)
+                return df
+            except pd.errors.EmptyDataError:
+                raise ValueError(f"Data file is empty: {data_path}")
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to load data from {data_path}. "
+                    f"Error: {str(e)}"
+                ) from e
+    except FileNotFoundError:
+        raise
+    except Exception as e:
+        raise ValueError(
+            f"Unexpected error loading data from {data_path}: {str(e)}"
+        ) from e
 
 
 def _load_from_zip(zip_path: Path) -> pd.DataFrame:
@@ -140,10 +289,23 @@ def parse_datetime(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     
     # Parse Date column (assumes YYYY-MM-DD format, with fallback)
+    if "Date" not in df.columns:
+        raise ValueError(
+            "Date column not found in DataFrame. "
+            "Required column 'Date' is missing."
+        )
+    
     df["datetime"] = pd.to_datetime(df["Date"], format="%Y-%m-%d", errors='coerce')
     # If that fails, try other common formats
     if df["datetime"].isna().any():
         df["datetime"] = pd.to_datetime(df["Date"], errors='coerce')
+    
+    # Check if all dates were successfully parsed
+    if df["datetime"].isna().all():
+        raise ValueError(
+            "Failed to parse Date column. "
+            "Please ensure dates are in a recognizable format (YYYY-MM-DD, MM/DD/YYYY, etc.)."
+        )
     
     df = df.set_index("datetime").sort_index()
     return df
@@ -166,7 +328,7 @@ def clean_and_validate_data(
     - Data type issues
     - Duplicate records
     - Negative values in Units Sold or Price
-    
+
     Args:
         df: Raw DataFrame to clean and validate
         check_product_category_consistency: If True, check for Product IDs in multiple categories
@@ -174,7 +336,7 @@ def clean_and_validate_data(
         remove_duplicates: If True, remove exact duplicate rows
         handle_negative_values: If True, handle negative Units Sold/Price (set to 0)
         verbose: If True, print validation results
-        
+
     Returns:
         Tuple of (cleaned DataFrame, validation report dictionary)
     """
@@ -356,16 +518,27 @@ def create_time_features(df: pd.DataFrame) -> pd.DataFrame:
     Create time-based features for demand forecasting.
 
     Adds calendar-based features that capture seasonality and trends:
-    - Day of week (weekend vs weekday patterns)
-    - Month (monthly seasonality)
-    - Quarter (quarterly trends)
-    - Day of month (monthly patterns)
+    - day_of_week: Day of week (0=Monday, 6=Sunday) - captures weekly patterns
+    - month: Month of year (1-12) - captures monthly seasonality
+    - quarter: Quarter of year (1-4) - captures quarterly trends
+    - day_of_month: Day of month (1-31) - captures monthly patterns
+    - is_weekend: Binary indicator (1 if Saturday/Sunday, 0 otherwise)
+
+    Temporal Semantics:
+    - All time features are derived from the date/datetime column and are
+      available at prediction time (no data leakage risk).
+    - These features capture cyclical patterns in demand (e.g., higher sales
+      on weekends, seasonal trends, monthly patterns).
 
     Args:
         df: DataFrame with datetime index or date column
 
     Returns:
-        DataFrame with time-based features added
+        DataFrame with time-based features added (day_of_week, month, quarter, 
+        day_of_month, is_weekend)
+
+    Raises:
+        ValueError: if no date/datetime information is available in the DataFrame
     """
     df = df.copy()
 
@@ -401,12 +574,26 @@ def create_lag_features_by_dimensions(
     Weather and Seasonality are included as features but not used for grouping
     to avoid fragmenting the time series into too many small groups.
 
+    Feature Semantics:
+    - lag_1: Sales quantity from 1 day ago (yesterday) for same product-location
+    - lag_7: Sales quantity from 7 days ago (same day last week) for same product-location
+    - lag_30: Sales quantity from 30 days ago (same day last month) for same product-location
+    
+    Temporal Semantics:
+    - Lag features use historical data only (no data leakage).
+    - Features are grouped by Store ID, Product ID, Category, and Region to ensure
+      lags are calculated per product-location combination.
+    - Missing values (for early days with no history) are filled with 0.
+
     Args:
         df: DataFrame with datetime index and grouping columns
-        lags: List of lag periods (in days)
+        lags: List of lag periods (in days), e.g., (1, 7, 30)
 
     Returns:
-        DataFrame with lag features added
+        DataFrame with lag features added (lag_1, lag_7, lag_30, etc.)
+
+    Raises:
+        ValueError: if required columns (quantity, date) are missing
     """
     df = df.copy()
 
@@ -449,12 +636,26 @@ def create_moving_averages_by_dimensions(
     Weather and Seasonality are included as features but not used for grouping
     to avoid fragmenting the time series into too many small groups.
 
+    Feature Semantics:
+    - ma_7: Rolling average of sales quantity over past 7 days for same product-location
+    - ma_30: Rolling average of sales quantity over past 30 days for same product-location
+    
+    Temporal Semantics:
+    - Moving averages use historical data only (no data leakage).
+    - Features are grouped by Store ID, Product ID, Category, and Region to ensure
+      averages are calculated per product-location combination.
+    - Missing values (for early days with insufficient history) are filled with 0.
+    - Uses rolling window: only includes past values, not future values.
+
     Args:
         df: DataFrame with datetime index and grouping columns
-        windows: List of window sizes (in days)
+        windows: List of window sizes (in days), e.g., (7, 30)
 
     Returns:
-        DataFrame with moving average features added
+        DataFrame with moving average features added (ma_7, ma_30, etc.)
+
+    Raises:
+        ValueError: if required columns (quantity, date) are missing
     """
     df = df.copy()
 
@@ -529,6 +730,16 @@ def create_numerical_features(df: pd.DataFrame) -> pd.DataFrame:
 
     Note: Demand Forecast is EXCLUDED to prevent data leakage - it's a pre-computed
     target variable and should not be used as a feature.
+
+    Feature Temporal Semantics:
+    - Inventory Level: Assumed to be start-of-day inventory (available at prediction time).
+      If your data contains end-of-day inventory, this may cause data leakage and should
+      be excluded or transformed to start-of-day values.
+    - Units Ordered: Assumed to be historical orders placed (not future orders).
+      If this represents orders to be placed in the future, it should be excluded to
+      prevent data leakage.
+    - Price, Discount, Competitor Pricing: Current values (available at prediction time).
+    - Holiday/Promotion: Binary indicators for current period (available at prediction time).
 
     Args:
         df: DataFrame with numerical columns
@@ -767,6 +978,8 @@ def time_aware_train_test_split(
     Returns:
         Tuple of (train_df, test_df)
     """
+    if not 0 < test_size < 1:
+        raise ValueError("test_size must be between 0 and 1")
     # Sort by date (either index or date column)
     if "date" in df.columns:
         df = df.sort_values("date")

@@ -1,0 +1,10 @@
+[project]
+name = "data_proj"
+version = "0.1.0"
+description = "Retail demand forecasting ML project"
+requires-python = ">=3.9"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"

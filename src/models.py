@@ -198,22 +198,108 @@ def train_naive_baselines(
         def __init__(self, y_train, train_df):
             self.y_train = y_train
             self.train_df = train_df
-            self.last_values = {}  # Fallback
-            if train_df is not None and "product_line" in train_df.columns:
-                for product in train_df["product_line"].unique():
-                    product_mask = train_df["product_line"] == product
-                    # Use train_df index to get corresponding y_train values
-                    product_indices = train_df[product_mask].index
-                    product_values = y_train.loc[product_indices] if hasattr(y_train, 'loc') else y_train[product_mask]
-                    self.last_values[product] = product_values.iloc[-1] if len(product_values) > 0 else 0.0
-                self.global_last = y_train.iloc[-1] if len(y_train) > 0 else 0.0
-            else:
-                self.global_last = y_train.iloc[-1] if len(y_train) > 0 else 0.0
+            # Store historical values by (product, day_of_week) for seasonal matching
+            self.seasonal_values = {}  # {(product, day_of_week): value}
+            self.last_values = {}  # Fallback: last value per product
+            self.global_last = y_train.iloc[-1] if len(y_train) > 0 else 0.0
+            
+            if train_df is not None:
+                # Get date information from index or date column
+                if isinstance(train_df.index, pd.DatetimeIndex):
+                    dates = train_df.index
+                elif "date" in train_df.columns:
+                    dates = pd.to_datetime(train_df["date"])
+                elif "datetime" in train_df.columns:
+                    dates = pd.to_datetime(train_df["datetime"])
+                else:
+                    dates = None
+                
+                # Get product identifier
+                if "product_line" in train_df.columns:
+                    product_col = "product_line"
+                elif "Product ID" in train_df.columns and "Category" in train_df.columns:
+                    # Use composite key
+                    product_col = None
+                else:
+                    product_col = None
+                
+                if dates is not None and product_col is not None:
+                    # Build seasonal lookup: (product, day_of_week) -> most recent value
+                    train_df_copy = train_df.copy()
+                    train_df_copy["_date"] = dates
+                    train_df_copy["_day_of_week"] = train_df_copy["_date"].dt.dayofweek
+                    train_df_copy["_y"] = y_train.values if hasattr(y_train, 'values') else y_train
+                    
+                    for product in train_df_copy[product_col].unique():
+                        product_mask = train_df_copy[product_col] == product
+                        product_data = train_df_copy[product_mask].copy()
+                        product_data = product_data.sort_values("_date")
+                        
+                        # Store last value per product (fallback)
+                        if len(product_data) > 0:
+                            self.last_values[product] = product_data["_y"].iloc[-1]
+                        
+                        # Store most recent value for each day of week
+                        for day_of_week in range(7):
+                            day_mask = product_data["_day_of_week"] == day_of_week
+                            day_data = product_data[day_mask]
+                            if len(day_data) > 0:
+                                # Use most recent value for this day of week
+                                self.seasonal_values[(product, day_of_week)] = day_data["_y"].iloc[-1]
+                elif product_col is not None:
+                    # No date info, fall back to last value per product
+                    for product in train_df[product_col].unique():
+                        product_mask = train_df[product_col] == product
+                        product_indices = train_df[product_mask].index
+                        product_values = y_train.loc[product_indices] if hasattr(y_train, 'loc') else y_train[product_mask]
+                        self.last_values[product] = product_values.iloc[-1] if len(product_values) > 0 else 0.0
         
         def predict(self, X_test, test_df=None):
-            # Simplified: use last value per product (full seasonal naive requires date matching)
-            if test_df is not None and "product_line" in test_df.columns:
-                return np.array([self.last_values.get(p, self.global_last) for p in test_df["product_line"]])
+            """Predict using seasonal naive: value from 7 days ago, same day of week."""
+            if test_df is not None:
+                # Get date information from test_df
+                if isinstance(test_df.index, pd.DatetimeIndex):
+                    test_dates = test_df.index
+                elif "date" in test_df.columns:
+                    test_dates = pd.to_datetime(test_df["date"])
+                elif "datetime" in test_df.columns:
+                    test_dates = pd.to_datetime(test_df["datetime"])
+                else:
+                    test_dates = None
+                
+                # Get product identifier
+                if "product_line" in test_df.columns:
+                    product_col = "product_line"
+                    products = test_df[product_col].values
+                elif "Product ID" in test_df.columns and "Category" in test_df.columns:
+                    # Use composite key
+                    products = (test_df["Product ID"].astype(str) + "_" + test_df["Category"].astype(str)).values
+                    product_col = None
+                else:
+                    products = None
+                    product_col = None
+                
+                if test_dates is not None and products is not None:
+                    # Use seasonal matching: same day of week
+                    test_day_of_week = test_dates.dayofweek.values
+                    predictions = []
+                    for i, (product, day_of_week) in enumerate(zip(products, test_day_of_week)):
+                        # Try seasonal match first
+                        key = (product, day_of_week)
+                        if key in self.seasonal_values:
+                            predictions.append(self.seasonal_values[key])
+                        elif product in self.last_values:
+                            # Fallback to last value for this product
+                            predictions.append(self.last_values[product])
+                        else:
+                            # Final fallback to global last
+                            predictions.append(self.global_last)
+                    return np.array(predictions)
+                elif products is not None:
+                    # No date info, use last value per product
+                    return np.array([self.last_values.get(p, self.global_last) for p in products])
+            
+            # No test_df or product info, return global last
             return np.full(len(X_test), self.global_last)
     
     baselines["baseline_last_value"] = LastValueBaseline(y_train, train_df)
@@ -747,10 +833,9 @@ def evaluate_model(
     y_pred = model.predict(X_test)
     y_pred_series = pd.Series(y_pred, index=y_test.index).clip(lower=0)
 
-    mae = mean_absolute_error(y_test, y_pred_series)
-    rmse = np.sqrt(mean_squared_error(y_test, y_pred_series))
-
-    metrics = {"MAE": mae, "RMSE": rmse}
+    # Use calculate_metrics to get MAE and RMSE
+    from src.evaluation import calculate_metrics
+    metrics = calculate_metrics(y_test, y_pred_series)
     
     # Add economic costs if cost_config provided
     if cost_config is not None:
@@ -1036,9 +1121,9 @@ def compare_models(
         if model_name.startswith("baseline_"):
             y_pred = model.predict(X_test, test_df)
             y_pred_series = pd.Series(y_pred, index=y_test.index).clip(lower=0)
-            mae = mean_absolute_error(y_test, y_pred_series)
-            rmse = np.sqrt(mean_squared_error(y_test, y_pred_series))
-            metrics = {"MAE": mae, "RMSE": rmse}
+            # Use calculate_metrics to get MAE and RMSE
+            from src.evaluation import calculate_metrics
+            metrics = calculate_metrics(y_test, y_pred_series)
             
             # Add economic costs if cost_config provided
             if cost_config is not None:

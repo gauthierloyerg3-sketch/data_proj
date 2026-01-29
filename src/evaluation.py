@@ -36,7 +36,6 @@ def calculate_metrics(y_true: pd.Series, y_pred: pd.Series) -> Dict[str, float]:
     """
     mae = mean_absolute_error(y_true, y_pred)
     rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-
     return {"MAE": mae, "RMSE": rmse}
 
 
@@ -1564,3 +1563,318 @@ def analyze_weather_seasonality_region_impact(
     impact_df.to_csv(save_path, index=False)
     
     return impact_df
+
+
+def analyze_temporal_error_patterns(
+    model,
+    X_test: pd.DataFrame,
+    y_test: pd.Series,
+    test_df: pd.DataFrame,
+    model_name: str,
+    scaler=None,
+) -> pd.DataFrame:
+    """
+    Analyze model errors by time period to identify temporal patterns.
+    
+    Identifies when the model performs best/worst (by day of week, month, quarter)
+    to help understand temporal biases and improve forecasting for specific time periods.
+    
+    Args:
+        model: Trained model
+        X_test: Test features
+        y_test: Test target
+        test_df: Test DataFrame with datetime index or date column
+        model_name: Name of the model
+        scaler: Fitted scaler (optional)
+        
+    Returns:
+        DataFrame with temporal error analysis (by day of week, month, quarter)
+    """
+    # Scale test features if scaler provided
+    if scaler is not None:
+        X_test_scaled = pd.DataFrame(
+            scaler.transform(X_test),
+            columns=X_test.columns,
+            index=X_test.index,
+        )
+        X_test = X_test_scaled
+    
+    # Make predictions
+    y_pred = model.predict(X_test)
+    y_pred_series = pd.Series(y_pred, index=y_test.index).clip(lower=0)
+    
+    # Create analysis DataFrame
+    analysis_df = pd.DataFrame(
+        {"actual": y_test.values, "predicted": y_pred_series.values},
+        index=y_test.index
+    )
+    
+    # Calculate errors
+    analysis_df["error"] = analysis_df["actual"] - analysis_df["predicted"]
+    analysis_df["abs_error"] = analysis_df["error"].abs()
+    analysis_df["pct_error"] = (analysis_df["abs_error"] / (analysis_df["actual"] + 1e-10)) * 100
+    
+    # Extract temporal features from index or test_df
+    if isinstance(test_df.index, pd.DatetimeIndex):
+        dates = test_df.index
+    elif "date" in test_df.columns:
+        dates = pd.to_datetime(test_df["date"])
+    elif isinstance(y_test.index, pd.DatetimeIndex):
+        dates = y_test.index
+    else:
+        # No temporal information available
+        return pd.DataFrame({
+            "Dimension": ["Overall"],
+            "Value": ["All"],
+            "MAE": [mean_absolute_error(analysis_df["actual"], analysis_df["predicted"])],
+            "RMSE": [np.sqrt(mean_squared_error(analysis_df["actual"], analysis_df["predicted"]))],
+            "Mean_Error": [analysis_df["error"].mean()],
+            "Std_Error": [analysis_df["error"].std()],
+            "n_samples": [len(analysis_df)]
+        })
+    
+    # Add temporal features
+    analysis_df["day_of_week"] = dates.dayofweek
+    analysis_df["day_name"] = dates.day_name()
+    analysis_df["month"] = dates.month
+    analysis_df["month_name"] = dates.month_name()
+    analysis_df["quarter"] = dates.quarter
+    analysis_df["is_weekend"] = (dates.dayofweek >= 5).astype(int)
+    
+    # Calculate metrics by temporal dimension
+    temporal_data = []
+    
+    # Overall metrics
+    mae_overall = mean_absolute_error(analysis_df["actual"], analysis_df["predicted"])
+    rmse_overall = np.sqrt(mean_squared_error(analysis_df["actual"], analysis_df["predicted"]))
+    temporal_data.append({
+        "Dimension": "Overall",
+        "Value": "All",
+        "MAE": mae_overall,
+        "RMSE": rmse_overall,
+        "Mean_Error": analysis_df["error"].mean(),
+        "Std_Error": analysis_df["error"].std(),
+        "Mean_Pct_Error": analysis_df["pct_error"].mean(),
+        "n_samples": len(analysis_df)
+    })
+    
+    # By day of week
+    for day_name in analysis_df["day_name"].unique():
+        day_data = analysis_df[analysis_df["day_name"] == day_name]
+        if len(day_data) > 0:
+            mae = mean_absolute_error(day_data["actual"], day_data["predicted"])
+            rmse = np.sqrt(mean_squared_error(day_data["actual"], day_data["predicted"]))
+            temporal_data.append({
+                "Dimension": "Day_of_Week",
+                "Value": day_name,
+                "MAE": mae,
+                "RMSE": rmse,
+                "Mean_Error": day_data["error"].mean(),
+                "Std_Error": day_data["error"].std(),
+                "Mean_Pct_Error": day_data["pct_error"].mean(),
+                "n_samples": len(day_data)
+            })
+    
+    # By weekend vs weekday
+    for weekend_flag in [0, 1]:
+        weekend_data = analysis_df[analysis_df["is_weekend"] == weekend_flag]
+        if len(weekend_data) > 0:
+            period_name = "Weekend" if weekend_flag == 1 else "Weekday"
+            mae = mean_absolute_error(weekend_data["actual"], weekend_data["predicted"])
+            rmse = np.sqrt(mean_squared_error(weekend_data["actual"], weekend_data["predicted"]))
+            temporal_data.append({
+                "Dimension": "Weekend_Status",
+                "Value": period_name,
+                "MAE": mae,
+                "RMSE": rmse,
+                "Mean_Error": weekend_data["error"].mean(),
+                "Std_Error": weekend_data["error"].std(),
+                "Mean_Pct_Error": weekend_data["pct_error"].mean(),
+                "n_samples": len(weekend_data)
+            })
+    
+    # By month
+    for month_name in analysis_df["month_name"].unique():
+        month_data = analysis_df[analysis_df["month_name"] == month_name]
+        if len(month_data) > 0:
+            mae = mean_absolute_error(month_data["actual"], month_data["predicted"])
+            rmse = np.sqrt(mean_squared_error(month_data["actual"], month_data["predicted"]))
+            temporal_data.append({
+                "Dimension": "Month",
+                "Value": month_name,
+                "MAE": mae,
+                "RMSE": rmse,
+                "Mean_Error": month_data["error"].mean(),
+                "Std_Error": month_data["error"].std(),
+                "Mean_Pct_Error": month_data["pct_error"].mean(),
+                "n_samples": len(month_data)
+            })
+    
+    # By quarter
+    for quarter in sorted(analysis_df["quarter"].unique()):
+        quarter_data = analysis_df[analysis_df["quarter"] == quarter]
+        if len(quarter_data) > 0:
+            mae = mean_absolute_error(quarter_data["actual"], quarter_data["predicted"])
+            rmse = np.sqrt(mean_squared_error(quarter_data["actual"], quarter_data["predicted"]))
+            temporal_data.append({
+                "Dimension": "Quarter",
+                "Value": f"Q{quarter}",
+                "MAE": mae,
+                "RMSE": rmse,
+                "Mean_Error": quarter_data["error"].mean(),
+                "Std_Error": quarter_data["error"].std(),
+                "Mean_Pct_Error": quarter_data["pct_error"].mean(),
+                "n_samples": len(quarter_data)
+            })
+    
+    temporal_df = pd.DataFrame(temporal_data)
+    
+    # Save analysis
+    save_path = Path("results/metrics/temporal_error_analysis.csv")
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    temporal_df.to_csv(save_path, index=False)
+    
+    return temporal_df
+
+
+def create_comprehensive_diagnostic_report(
+    model,
+    X_test: pd.DataFrame,
+    y_test: pd.Series,
+    test_df: pd.DataFrame,
+    model_name: str,
+    scaler=None,
+    save_path: str = "results/metrics/comprehensive_diagnostics.txt",
+) -> str:
+    """
+    Create comprehensive diagnostic report combining product, temporal, and dimension analysis.
+    
+    Generates a single report file with all diagnostic information for easy review.
+    
+    Args:
+        model: Trained model
+        X_test: Test features
+        y_test: Test target
+        test_df: Test DataFrame
+        model_name: Name of the model
+        scaler: Fitted scaler (optional)
+        save_path: Path to save the diagnostic report
+        
+    Returns:
+        Path to saved report
+    """
+    report_lines = []
+    report_lines.append("=" * 80)
+    report_lines.append(f"COMPREHENSIVE MODEL DIAGNOSTICS: {model_name}")
+    report_lines.append("=" * 80)
+    report_lines.append("")
+    
+    # Overall metrics
+    if scaler is not None:
+        X_test_scaled = pd.DataFrame(
+            scaler.transform(X_test),
+            columns=X_test.columns,
+            index=X_test.index,
+        )
+        y_pred = model.predict(X_test_scaled)
+    else:
+        y_pred = model.predict(X_test)
+    
+    y_pred_series = pd.Series(y_pred, index=y_test.index).clip(lower=0)
+    metrics = calculate_metrics(y_test, y_pred_series)
+    
+    report_lines.append("OVERALL PERFORMANCE")
+    report_lines.append("-" * 80)
+    report_lines.append(f"MAE:  {metrics['MAE']:.4f}")
+    report_lines.append(f"RMSE: {metrics['RMSE']:.4f}")
+    report_lines.append("")
+    
+    # Per-product analysis
+    report_lines.append("PER-PRODUCT PERFORMANCE")
+    report_lines.append("-" * 80)
+    try:
+        per_product_df = analyze_per_product_performance(
+            model, X_test, y_test, test_df, model_name, scaler=scaler
+        )
+        if not per_product_df.empty:
+            # Top 5 best and worst products
+            best_products = per_product_df.nsmallest(5, "RMSE")
+            worst_products = per_product_df.nlargest(5, "RMSE")
+            
+            report_lines.append("Top 5 Best Performing Products (Lowest RMSE):")
+            for _, row in best_products.iterrows():
+                report_lines.append(f"  {row['product_line']}: RMSE={row['RMSE']:.2f}, MAE={row['MAE']:.2f}")
+            report_lines.append("")
+            
+            report_lines.append("Top 5 Worst Performing Products (Highest RMSE):")
+            for _, row in worst_products.iterrows():
+                report_lines.append(f"  {row['product_line']}: RMSE={row['RMSE']:.2f}, MAE={row['MAE']:.2f}")
+        else:
+            report_lines.append("  Per-product analysis not available (missing product identification)")
+    except Exception as e:
+        report_lines.append(f"  Error in per-product analysis: {str(e)}")
+    report_lines.append("")
+    
+    # Temporal analysis
+    report_lines.append("TEMPORAL ERROR PATTERNS")
+    report_lines.append("-" * 80)
+    try:
+        temporal_df = analyze_temporal_error_patterns(
+            model, X_test, y_test, test_df, model_name, scaler=scaler
+        )
+        if not temporal_df.empty:
+            # Best and worst days
+            day_data = temporal_df[temporal_df["Dimension"] == "Day_of_Week"]
+            if not day_data.empty:
+                best_day = day_data.nsmallest(1, "RMSE")
+                worst_day = day_data.nlargest(1, "RMSE")
+                report_lines.append(f"Best Day: {best_day['Value'].iloc[0]} (RMSE={best_day['RMSE'].iloc[0]:.2f})")
+                report_lines.append(f"Worst Day: {worst_day['Value'].iloc[0]} (RMSE={worst_day['RMSE'].iloc[0]:.2f})")
+                report_lines.append("")
+            
+            # Weekend vs weekday
+            weekend_data = temporal_df[temporal_df["Dimension"] == "Weekend_Status"]
+            if not weekend_data.empty:
+                for _, row in weekend_data.iterrows():
+                    report_lines.append(f"{row['Value']}: RMSE={row['RMSE']:.2f}, Mean Error={row['Mean_Error']:.2f}")
+                report_lines.append("")
+        else:
+            report_lines.append("  Temporal analysis not available (missing date information)")
+    except Exception as e:
+        report_lines.append(f"  Error in temporal analysis: {str(e)}")
+    report_lines.append("")
+    
+    # Dimension analysis (Weather/Seasonality/Region)
+    report_lines.append("DIMENSION IMPACT ANALYSIS")
+    report_lines.append("-" * 80)
+    try:
+        impact_df = analyze_weather_seasonality_region_impact(
+            model, X_test, y_test, test_df, model_name, scaler=scaler
+        )
+        if not impact_df.empty:
+            # Best and worst conditions
+            for dimension in ["Weather Condition", "Seasonality", "Region"]:
+                dim_data = impact_df[impact_df["Dimension"] == dimension]
+                if not dim_data.empty:
+                    best = dim_data.nsmallest(1, "RMSE")
+                    worst = dim_data.nlargest(1, "RMSE")
+                    report_lines.append(f"{dimension}:")
+                    report_lines.append(f"  Best: {best['Value'].iloc[0]} (RMSE={best['RMSE'].iloc[0]:.2f})")
+                    report_lines.append(f"  Worst: {worst['Value'].iloc[0]} (RMSE={worst['RMSE'].iloc[0]:.2f})")
+                    report_lines.append("")
+    except Exception as e:
+        report_lines.append(f"  Error in dimension analysis: {str(e)}")
+    report_lines.append("")
+    
+    report_lines.append("=" * 80)
+    report_lines.append("END OF DIAGNOSTIC REPORT")
+    report_lines.append("=" * 80)
+    
+    # Save report
+    report_text = "\n".join(report_lines)
+    save_path_obj = Path(save_path)
+    save_path_obj.parent.mkdir(parents=True, exist_ok=True)
+    with open(save_path_obj, "w") as f:
+        f.write(report_text)
+    
+    return str(save_path_obj)

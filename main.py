@@ -192,6 +192,21 @@ def main():
             best_model, X_test, y_test, test_df, best_model_name, scaler=best_model_scaler
         )
         
+        # Step 5.6: Comprehensive diagnostic analysis (silent unless verbose)
+        if show_technical:
+            from src.evaluation import (
+                analyze_temporal_error_patterns,
+                create_comprehensive_diagnostic_report,
+            )
+            temporal_df = analyze_temporal_error_patterns(
+                best_model, X_test, y_test, test_df, best_model_name, scaler=best_model_scaler
+            )
+            diagnostic_report_path = create_comprehensive_diagnostic_report(
+                best_model, X_test, y_test, test_df, best_model_name, scaler=best_model_scaler
+            )
+            if verbose:
+                print(f"Comprehensive diagnostics saved to: {diagnostic_report_path}")
+        
         # Step 6: Revenue forecasting (if enabled)
         if CONFIG.forecasting.forecast_revenue:
             if verbose:

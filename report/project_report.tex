@@ -1,0 +1,293 @@
+% Advanced Programming 2025 - Project Report
+% HEC Lausanne / UNIL
+\documentclass[11pt,a4paper]{article}
+
+% Packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{hyperref}
+\usepackage[margin=1in]{geometry}
+\usepackage{fancyhdr}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{biblatex}
+\addbibresource{references.bib}
+
+% Code listing settings
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{pythonstyle}{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=left,
+    numbersep=5pt,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=2,
+    language=Python,
+    columns=fullflexible
+}
+
+\lstset{style=pythonstyle}
+
+% Header and footer
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{Advanced Programming 2025}
+\lhead{Project Report}
+\rfoot{Page \thepage}
+
+% Title page information
+\title{%
+    \Large \textbf{Advanced Programming 2025} \\
+    \vspace{0.5cm}
+    \LARGE \textbf{Retail Store Inventory Forecasting ML System} \\
+    \vspace{0.3cm}
+    \large Final Project Report
+}
+\author{
+    Gauthier Loyer \\
+    \texttt{gauthier.loyer@unil.ch} \\
+    Student ID: 20411666
+}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{empty}
+
+\begin{abstract}
+\noindent
+This project builds a retail demand forecasting system that predicts daily units sold and revenue and converts predictions into order recommendations with economic cost implications. Using the provided retail inventory dataset, the pipeline cleans and validates records, aggregates daily sales by store, product, category, and region, and engineers time, lag, moving-average, and categorical features. Multiple supervised models are trained (linear regression, random forest, and gradient boosting), and baselines are included for comparison. Evaluation uses MAE and RMSE, alongside finance-relevant cost estimates that quantify holding and stockout costs. The best-performing model in the latest run is a random forest, which yields the lowest RMSE and supports inventory decisions through recommendation tables and visual diagnostics. The system emphasizes time-aware splitting to reduce look-ahead bias and documents potential data leakage risks around inventory and ordering features. The main contribution is an end-to-end, reproducible workflow that connects forecasting accuracy to inventory cost decisions, supported by diagnostics and per-product performance analysis.
+\end{abstract}
+
+\vspace{0.5cm}
+\noindent\textbf{Keywords:} demand forecasting, inventory optimization, time series, machine learning, retail analytics, cost-sensitive evaluation
+
+\newpage
+\tableofcontents
+\newpage
+
+% ================== MAIN CONTENT ==================
+
+\section{Introduction}
+\label{sec:introduction}
+This project addresses retail inventory forecasting, a problem with direct financial impact through overstocking (holding costs) and stockouts (lost revenue). The repository implements an end-to-end workflow that predicts daily units sold (primary target) and revenue (secondary target) and converts forecasts into product-level reorder recommendations.
+
+\subsection{Background and Motivation}
+This project is motivated by practical consulting use cases where machine learning models support operational decision-making in retail. Retail stores regularly face ordering and inventory planning decisions; the goal is to transform historical sales data into actionable insights by predicting how much of each product will sell and converting those predictions into reorder suggestions (e.g., ``order $X$ units if predicted sales exceed current stock'').
+
+\subsection{Problem Statement}
+Given daily sales records with contextual features (e.g., Weather Condition, Seasonality, Region), predict future daily demand (units sold) per product and store context, and produce reorder quantities and urgency indicators.
+
+\textbf{Research question:} How accurately can machine learning models forecast daily retail demand using historical sales and contextual features, and how can these forecasts be translated into cost-aware inventory ordering decisions?
+
+\subsection{Objectives and Goals}
+\begin{itemize}
+    \item Build a reproducible pipeline from data loading to recommendations.
+    \item Compare multiple models and simple baselines using time-aware validation.
+    \item Report both ML accuracy and finance-relevant cost impact.
+    \item Provide diagnostics and per-product performance analysis.
+\end{itemize}
+
+\subsection{Report Organization}
+Section~\ref{sec:literature} covers the research question and related work, Section~\ref{sec:methodology} describes data, features, and modeling choices, Section~\ref{sec:results} reports the experimental setup, metrics, and figures, Section~\ref{sec:discussion} interprets results and limitations, Section~\ref{sec:conclusion} concludes with future work, and Section~\ref{sec:codebase} summarizes codebase and reproducibility.
+
+\section{Research Question and Related Work}
+\label{sec:literature}
+This section situates the research question within existing methodological approaches to retail demand forecasting and motivates the modeling choices used in this project. The repository does not include external papers/books to cite, so what follows summarizes relevant prior \textit{approach families} using only what is implemented in the project (and flags missing external citations explicitly). Tree-based ensembles are suitable here because they capture non-linear relationships and interactions between features.
+
+\subsection{Previous Approaches to Similar Problems}
+The codebase includes simple forecasting baselines (last value, mean, seasonal naive) and supervised ML models trained on engineered temporal features (lags and moving averages). These represent standard benchmark families for demand forecasting: naive/statistical heuristics versus feature-based supervised learning.
+
+\subsection{Relevant Algorithms or Methodologies}
+Implemented models include linear regression (interpretable baseline), random forest regression, and gradient boosting regression. The validation strategy uses a chronological split and time-series cross-validation (TimeSeriesSplit) to limit look-ahead bias.
+
+\subsection{Datasets Used in Related Studies}
+The repo contains a single local dataset archive (\path{data/raw/Retail_store_inventory_forecasting_dataset.zip}). The external provenance for this dataset is the Kaggle dataset page provided during project finalization: \url{https://www.kaggle.com/datasets/alexhuitron/supermarket-sales?resource=download}. The dataset is downloaded and stored locally in the repository as a ZIP archive to support reproducibility.
+
+\section{Methodology}
+\label{sec:methodology}
+
+\subsection{Data Description}
+Raw and processed datasets are stored locally to ensure reproducibility.\footnote{Raw: \url{data/raw/Retail_store_inventory_forecasting_dataset.zip}; processed: \url{data/processed/processed_data.csv}. The processed dataset contains 73{,}100 rows and 68 columns, with dates from 2022-01-01 to 2024-01-01.}
+
+\subsubsection{Source and Collection Method}
+The dataset is shipped as a local ZIP file inside the repository. The external provenance is the Kaggle dataset page: \url{https://www.kaggle.com/datasets/alexhuitron/supermarket-sales?resource=download}. The ZIP is used as the local, versioned input artifact for the pipeline.
+
+\subsubsection{Size and Characteristics}
+The processed table has 73{,}100 rows and 68 columns with a daily date field spanning 2022-01-01 through 2024-01-01. Observations are keyed by date and retail dimensions (Store ID, Product ID, Category, Region).
+
+\subsubsection{Features/Variables}
+Key predictive features include Weather Condition, Seasonality, and Region, plus Store ID, Product ID, and Category. Numerical features include Price, Inventory Level, Units Ordered, Discount, and Competitor Pricing. Time-derived features include day-of-week, month, quarter, weekend flag, and engineered lag and moving-average features. The primary target is Units Sold (standardized as \texttt{quantity}); revenue is derived as Price $\times$ Units Sold and stored as \texttt{revenue}.
+
+\subsubsection{Data Quality Issues}
+The pipeline performs schema validation, missing value handling, duplicate removal, negative value correction, and Product ID--Category consistency checks. A precomputed \texttt{Demand Forecast} column is present in the dataset and is explicitly excluded from features to reduce target leakage risk. Potential leakage risks remain for \texttt{Inventory Level} and \texttt{Units Ordered} if their timestamps are not aligned with decision time (discussed further in Section~\ref{sec:discussion}).
+
+\subsection{Modeling and Evaluation Approach}
+Linear Regression, Random Forest Regressor, and Gradient Boosting Regressor are trained for demand forecasting. The project also evaluates naive baselines (last value, mean, seasonal naive) for context. All models are classical ML estimators (no neural networks); the tree ensembles capture non-linearities while linear regression provides an interpretable baseline. Raw data are loaded from ZIP/CSV, parsed into a datetime index, cleaned/validated, aggregated to daily sales by dimensions, filtered for minimum history, enriched with time features, lag features, moving averages, and one-hot encoded categorical features. A time-aware split is applied to avoid mixing future observations into training. The forecasting task predicts units sold for day~$t$ using features available up to day~$t-1$. Model performance is evaluated using MAE (Mean Absolute Error) and RMSE (Root Mean Squared Error). The pipeline also computes an economic cost proxy (holding vs.\ stockout cost) to interpret forecasting error in financial terms. The cost metric is a simplified proxy intended to compare models under consistent assumptions rather than represent a full accounting-grade inventory cost model. Holding cost is set to \$0.1 per unit per day and stockout cost to \$10 per unit; costs are asymmetric. Total cost sums these penalties across the test period.
+
+\subsection{Implementation}
+Key implementation decisions include modularizing the pipeline into data loading, modeling, and evaluation components to ensure reproducibility and clarity. Particular attention was given to time-aware splitting to prevent look-ahead bias and to feature exclusion rules to mitigate data leakage risks.
+
+\subsubsection{Programming Languages and Libraries}
+Python 3.9 is used with pandas/numpy for data handling, scikit-learn for modeling, and matplotlib/seaborn for visualization. Models and scalers are persisted with joblib.
+
+\subsubsection{System Architecture}
+The primary entry point \texttt{main.py} orchestrates data loading \texttt{src/data\_loader.py}, model training and cross-validation \texttt{src/models.py}, and evaluation/visualization/recommendations \texttt{src/evaluation.py}. Configuration lives in \texttt{src/config.py}.
+
+\subsubsection{Key Code Components}
+(i) preprocessing and feature engineering; (ii) model training (including baselines); (iii) evaluation metrics (MAE/RMSE) and cost computation; (iv) recommendation generation and final reporting; (v) diagnostic plots and per-product analysis.
+
+The following function illustrates the metric computation used across evaluations. It uses \texttt{mean\_absolute\_error} and \texttt{mean\_squared\_error} from \texttt{sklearn.metrics}, and \texttt{numpy} (\texttt{np}) and \texttt{pandas}.
+
+\begin{lstlisting}[caption={Metric computation with MAE and RMSE},breaklines=false]
+def calculate_metrics(y_true: pd.Series, y_pred: pd.Series) -> Dict[str, float]:
+    """Calculate MAE and RMSE metrics."""
+    mae = mean_absolute_error(y_true, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    return {"MAE": mae, "RMSE": rmse}
+\end{lstlisting}
+
+\section{Results}
+\label{sec:results}
+
+\subsection{Experimental Setup}
+\begin{itemize}
+    \item \textbf{Hardware specifications}: MacBook Air (Model Identifier: Mac16,13), Apple M4 (10 cores: 4 performance + 6 efficiency), 16 GB RAM, macOS 15.7.3 (Build 24G419).
+    \item \textbf{Software versions}: Python 3.9.6 and dependencies snapshot saved at \url{report/dependencies_snapshot.txt}.
+    \item \textbf{Hyperparameters}: Key configuration in \texttt{src/config.py} includes test size 0.2, minimum history 30 days, lag windows (1, 7, 30), moving average windows (7, 30), random state 42, and 5-fold time-series cross-validation. Hyperparameter tuning and XGBoost are disabled by default.
+\end{itemize}
+
+\subsection{Performance Evaluation}
+Table~\ref{tab:performance} reports model metrics from \texttt{results/metrics/model\_comparison.csv}. Random forest achieves the lowest RMSE in the latest run and is used for recommendations. The random forest outperforms the baseline by capturing non-linear effects and interactions between temporal features, pricing, and categorical variables. Linear regression underfits these relationships, while gradient boosting did not provide additional gains under the default hyperparameter configuration.
+
+\begin{table}[H]
+\centering
+\caption{Model Performance Metrics (Quantity Forecasting)}
+\label{tab:performance}
+\begin{tabular}{|l|c|c|}
+\hline
+\textbf{Model} & \textbf{MAE} & \textbf{RMSE} \\
+\hline
+Baseline (mean) & 88.80 & 108.25 \\
+Random forest & 61.87 & 79.89 \\
+\hline
+\end{tabular}
+\end{table}
+\noindent Only the top baseline and best model are shown; the full comparison is in \texttt{results/metrics/model\_comparison.csv}.
+
+Cost-sensitive evaluation computes total economic cost combining holding and stockout costs; the best model run reports a total cost of approximately \$4.54M. (Recall that the cost metric is a simplified proxy for model comparison, not an accounting-grade estimate.)
+
+Additionally, the repository runs a revenue forecasting track (enabled in configuration), producing \texttt{results/metrics/revenue\_model\_comparison.csv}. In the latest run, \texttt{random\_forest\_revenue} shows the lowest RMSE among the revenue models.
+
+\subsection{Visualizations}
+Figure~\ref{fig:predictions} shows prediction vs. actual for the best model, Figure~\ref{fig:residuals} shows residual diagnostics, and Figure~\ref{fig:perproduct} summarizes per-product error. Figure~\ref{fig:trends} shows historical sales trends.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{report/figures/random_forest_predictions.png}
+\caption{Random forest predictions vs.\ actuals}
+\label{fig:predictions}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{report/figures/random_forest_residuals.png}
+\caption{Random forest residual diagnostics}
+\label{fig:residuals}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{report/figures/per_product_performance.png}
+\caption{Per-product performance (RMSE)}
+\label{fig:perproduct}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{report/figures/sales_trends.png}
+\caption{Sales trends over time}
+\label{fig:trends}
+\end{figure}
+
+\section{Discussion}
+\label{sec:discussion}
+The random forest model provides the best quantitative accuracy across MAE and RMSE, and supports an economically grounded recommendation system with explicit cost calculations. The evaluation pipeline includes time-aware splitting and cross-validation, which are appropriate for temporal retail data. A key challenge is potential leakage for features like Inventory Level and Units Ordered; the code documents these risks and includes validation checks, but the report cannot confirm the data collection semantics without external documentation. In a production setting, this risk could be mitigated by shifting inventory-related features by one decision period or restricting features to information available strictly at order time. Another limitation is the absence of external baselines such as ARIMA or exponential smoothing in the repo, limiting direct comparison to classical time-series methods. The diagnostics show variability across products, indicating heterogeneous demand patterns and opportunities for targeted improvements.
+
+\section{Conclusion and Future Work}
+\label{sec:conclusion}
+
+\subsection{Summary}
+This project delivers a reproducible retail demand forecasting pipeline that links prediction accuracy to inventory cost decisions. It integrates data validation, feature engineering, multiple ML models, and cost-aware evaluation, producing actionable order recommendations. The best-performing model is a random forest with the lowest RMSE in the latest run.
+
+\subsection{Future Directions}
+\begin{itemize}
+    \item Add classical time-series baselines (e.g., ARIMA or exponential smoothing) for stronger benchmarking.
+    \item Expand diagnostics to quantify uncertainty and stability across temporal regimes.
+    \item Record and report hardware and runtime metrics for full experimental transparency.
+    \item Incorporate external business constraints (lead times, service levels) into recommendations.
+\end{itemize}
+
+\section{Codebase and Reproducibility}
+\label{sec:codebase}
+The project is fully reproducible from the provided codebase. Dependencies are listed in \texttt{requirements.txt}, and the full pipeline can be executed using \texttt{python main.py}, which generates trained models, evaluation metrics, figures, and inventory recommendations. Detailed repository structure and setup steps are given in Appendix~\ref{app:code}.
+
+% ================== REFERENCES ==================
+\newpage
+\section*{References}
+\addcontentsline{toc}{section}{References}
+
+\begin{enumerate}
+    \item Project README (local repository). \textit{README.md}.
+    \item Project Proposal (local repository). \textit{PROPOSAL.md}.
+    \item Project Review (local repository). \textit{MASTERS\_REVIEW.md}.
+    \item Retail Store Inventory Forecasting Dataset (local file). \textit{data/raw/Retail\_store\_inventory\_forecasting\_dataset.zip}.
+    \item Kaggle dataset provenance (provided during report finalization). Available at: \url{https://www.kaggle.com/datasets/alexhuitron/supermarket-sales?resource=download}.
+\end{enumerate}
+
+% ================== APPENDICES ==================
+\newpage
+\appendix
+\section{Additional Figures}
+\label{app:figures}
+Additional figures are stored in \texttt{results/figures/} and include feature importance, residual diagnostics, and revenue forecasting plots.
+
+\section{Code Repository}
+\label{app:code}
+\noindent
+\textbf{GitHub Repository:} \url{https://github.com/gauthierloyerg3-sketch/data_proj}
+
+\noindent
+Repository structure and reproduction steps:
+\begin{itemize}
+    \item \textbf{Structure}: \texttt{src/} for code, \texttt{data/} for datasets, \texttt{results/} for metrics and figures, \texttt{models/} for trained artifacts.
+    \item \textbf{Installation}: \texttt{pip install -r requirements.txt} (or conda environment per \texttt{environment.yml}).
+    \item \textbf{Reproduction}: Run \texttt{python main.py} to generate metrics, figures, and recommendations.
+\end{itemize}
+
+\section{Use of AI Tools}
+\label{app:ai}
+AI tools were used as supportive assistants during the development of this project. ChatGPT was used to help refine explanations, improve clarity of written sections, and assist with debugging isolated code issues. Cursor AI was used to support coding tasks, refactoring, and adding comments to the code. All modeling choices, implementation decisions, experimental design, and result interpretation were made and validated by me.
+
+\end{document}
