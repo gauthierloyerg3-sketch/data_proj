@@ -358,7 +358,7 @@ def main():
     except FileNotFoundError as e:
         from src.output_formatter import print_error
         print_error(f"File not found: {e}")
-        print("Please ensure the dataset is in data/raw/supermarket_sales.csv")
+        print("Please ensure the dataset is in data/raw/Retail_store_inventory_forecasting_dataset.zip")
         return 1
 
     except Exception as e:
